@@ -43,10 +43,9 @@
                   platforms = lib.platforms.linux;
                 };
               };
-             default = phosgraphe;
+            default = phosgraphe;
           };
 
-#          packages.default = packages.phosgraphe;
           defaultApp = packages.phosgraphe;
 
           checks = {
@@ -56,6 +55,7 @@
                   buildInputs = with pkgs; [ go_1_18 ];
                 } ''
                 if [ "$(${pkgs.go_1_18}/bin/gofmt -s -l ${./.} | wc -l)" -gt 0 ]; then exit 1; fi
+                ${pkgs.nixpkgs-fmt}/bin/nixpkgs-fmt --check ${./.}
                 touch $out # it worked!
               '';
           };
