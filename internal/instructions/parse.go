@@ -15,6 +15,18 @@ type instructionStep struct {
 
 type Instructions []instructionStep
 
+func (i *Instructions) String() string {
+	var segments []string
+	for _, step := range *i {
+		var segment []string
+		for _, instruction := range step.Instructions {
+			segment = append(segment, instruction)
+		}
+		segments = append(segments, strings.Join(segment, ","))
+	}
+	return strings.Join(segments, "/")
+}
+
 func Parse(input string) Instructions {
 	instructions := Instructions{}
 	components := strings.Split(input, "/")
@@ -22,7 +34,7 @@ func Parse(input string) Instructions {
 		step := instructionStep{}
 		stepComponents := strings.Split(s, ",")
 		for _, k := range stepComponents {
-			step.Instructions = append(step.Instructions, Instruction(k))
+			step.Instructions = append(step.Instructions, k)
 		}
 		instructions = append(instructions, step)
 	}

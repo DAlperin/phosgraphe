@@ -1,11 +1,13 @@
 package image
 
 import (
+	"fmt"
 	"github.com/DAlperin/phosgraphe/internal/instructions"
-	"github.com/DAlperin/phosgraphe/internal/models"
+	"github.com/DAlperin/phosgraphe/internal/utils"
 	"github.com/gofiber/fiber/v2"
-	"log"
+	"net/http"
 	"net/url"
+	"time"
 )
 
 type Handler struct {
@@ -19,19 +21,18 @@ func (u *Handler) RegisterHandlers(r fiber.Router) {
 func (u *Handler) GetImage(c *fiber.Ctx) error {
 	var hash string
 	var parsed instructions.Instructions
-	var imageLink *string
-	var variant *models.Image
+	var variantData []byte
 
 	namespace := c.Params("namespace")
 	unescapedNamespace, err := url.PathUnescape(namespace)
 	if err != nil {
-		log.Fatal(err)
+		return utils.SendError(c, err)
 	}
 
 	name := c.Params("name")
 	unescapedName, err := url.PathUnescape(name)
 	if err != nil {
-		log.Fatal(err)
+		return utils.SendError(c, err)
 	}
 
 	if len(c.Params("*")) > 0 {
@@ -42,39 +43,38 @@ func (u *Handler) GetImage(c *fiber.Ctx) error {
 	image, isVariant, err := u.ImageService.Find(unescapedNamespace, unescapedName, hash)
 	if image == nil {
 		image, err := u.ImageService.FindBase(unescapedNamespace, unescapedName)
+		if err != nil {
+			return utils.SendError(c, err)
+		}
 		if image == nil {
-			return sendError(c, err)
+			return utils.SendError(c, err)
 		} else if len(parsed) > 0 {
-			variant, err = u.ImageService.BuildVariant(unescapedName, unescapedNamespace, parsed, hash)
+			_, variantData, err = u.ImageService.BuildVariant(unescapedName, unescapedNamespace, parsed, hash)
 			if err != nil {
-				return err
+				return utils.SendError(c, err)
 			}
 		}
-		if err != nil {
-			return sendError(c, err)
-		}
 	} else if err != nil {
-		return sendError(c, err)
+		return utils.SendError(c, err)
 	}
 
-	if isVariant {
-		imageLink, err = u.ImageService.GetVariantLink(*image)
-	} else if variant != nil {
-		imageLink, err = u.ImageService.GetVariantLink(*variant)
+	var imgData []byte
+	if variantData != nil {
+		imgData = variantData
+		err = nil
+	} else if isVariant {
+		imgData, err = u.ImageService.DownloadVariant(*image)
 	} else {
-		imageLink, err = u.ImageService.GetLink(*image)
+		imgData, err = u.ImageService.Download(*image)
 	}
+
 	if err != nil {
-		return sendError(c, err)
+		return utils.SendError(c, err)
 	}
 
-	//If we get here we should have an image link either to a base or variant
-	return c.Redirect(*imageLink, 302)
-}
+	contentType := http.DetectContentType(imgData)
+	c.Set("Content-type", contentType)
+	c.Set("Cache-Control", fmt.Sprintf("max-age=%d", 24*time.Hour*7))
 
-func sendError(c *fiber.Ctx, err error) error {
-	c.Status(500)
-	return c.JSON(fiber.Map{
-		"error": err.Error(),
-	})
+	return c.Send(imgData)
 }

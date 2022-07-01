@@ -3,13 +3,13 @@ package image
 import (
 	"bytes"
 	"fmt"
+	"github.com/DAlperin/phosgraphe/internal"
 	"github.com/DAlperin/phosgraphe/internal/instructions"
 	"github.com/DAlperin/phosgraphe/internal/models"
 	"github.com/DAlperin/phosgraphe/internal/transforms"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
-	"github.com/spf13/viper"
 	"gorm.io/gorm"
 	"io"
 	"mime/multipart"
@@ -18,16 +18,28 @@ import (
 )
 
 type Service struct {
-	DB               *gorm.DB
-	S3Svc            *s3.S3
-	Uploader         *s3manager.Uploader
-	Downloader       *s3manager.Downloader
-	TransformManager *transforms.TransformManager
+	db               *gorm.DB
+	s3Svc            *s3.S3
+	uploader         *s3manager.Uploader
+	downloader       *s3manager.Downloader
+	transformManager *transforms.TransformManager
+	config           internal.Config
+}
+
+func NewService(db *gorm.DB, s3svc *s3.S3, uploader *s3manager.Uploader, downloader *s3manager.Downloader, transformManager *transforms.TransformManager, config internal.Config) *Service {
+	return &Service{
+		db:               db,
+		s3Svc:            s3svc,
+		uploader:         uploader,
+		downloader:       downloader,
+		transformManager: transformManager,
+		config:           config,
+	}
 }
 
 func (s *Service) Exists(name string, namespace string) bool {
 	var existing models.Image
-	r := s.DB.Where("pretty_name = ? AND namespace = ?", name, namespace).First(&existing)
+	r := s.db.Where("pretty_name = ? AND namespace = ?", name, namespace).First(&existing)
 	if r.Error != nil {
 		return false
 	}
@@ -35,7 +47,7 @@ func (s *Service) Exists(name string, namespace string) bool {
 }
 
 func (s *Service) Store(image *models.Image) error {
-	r := s.DB.Create(image)
+	r := s.db.Create(image)
 	if r.Error != nil {
 		return r.Error
 	}
@@ -60,13 +72,14 @@ func (s *Service) Upload(file multipart.File, namespace string, name string) (*m
 	if err != nil {
 		return nil, err
 	}
+	//Don't accidentally truncate the image. The image will still *technically* be readable but ImageMagick will be mad
 	_, err = file.Seek(0, io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(contentType)
-	up, err := s.Uploader.Upload(&s3manager.UploadInput{
-		Bucket:      aws.String(viper.GetString("AWS_BUCKET")),
+
+	up, err := s.uploader.Upload(&s3manager.UploadInput{
+		Bucket:      aws.String(s.config.AwsBucket),
 		Key:         aws.String(fmt.Sprintf("%s-%s", namespace, name)),
 		Body:        file,
 		ContentType: aws.String(contentType),
@@ -75,7 +88,6 @@ func (s *Service) Upload(file multipart.File, namespace string, name string) (*m
 		return nil, err
 	}
 
-	fmt.Println(up.Location)
 	return &models.Image{
 		PrettyName: name,
 		Namespace:  namespace,
@@ -85,7 +97,7 @@ func (s *Service) Upload(file multipart.File, namespace string, name string) (*m
 
 func (s *Service) Find(namespace string, name string, hash string) (*models.Image, bool, error) {
 	var image models.Image
-	r := s.DB.Where("pretty_name = ? AND namespace = ? AND hash = ?", name, namespace, hash).First(&image)
+	r := s.db.Where("pretty_name = ? AND namespace = ? AND hash = ?", name, namespace, hash).First(&image)
 	if r.Error != nil {
 		return nil, false, r.Error
 	}
@@ -97,19 +109,21 @@ func (s *Service) Find(namespace string, name string, hash string) (*models.Imag
 
 func (s *Service) FindBase(namespace string, name string) (*models.Image, error) {
 	var image models.Image
-	r := s.DB.Where("pretty_name = ? AND namespace = ?", name, namespace).First(&image)
+	r := s.db.Where("pretty_name = ? AND namespace = ?", name, namespace).First(&image)
 	if r.Error != nil {
 		return nil, r.Error
 	}
 	return &image, nil
 }
 
+// FIXME: we need to find a way to cache the pre-signed links
+
 func (s *Service) GetLink(image models.Image) (*string, error) {
-	req, _ := s.S3Svc.GetObjectRequest(&s3.GetObjectInput{
-		Bucket: aws.String(viper.GetString("AWS_BUCKET")),
+	req, _ := s.s3Svc.GetObjectRequest(&s3.GetObjectInput{
+		Bucket: aws.String(s.config.AwsBucket),
 		Key:    aws.String(fmt.Sprintf("%s-%s", image.Namespace, image.PrettyName)),
 	})
-	urlStr, err := req.Presign(1 * time.Minute)
+	urlStr, err := req.Presign(20 * time.Minute)
 	if err != nil {
 		return nil, err
 	}
@@ -117,44 +131,65 @@ func (s *Service) GetLink(image models.Image) (*string, error) {
 }
 
 func (s *Service) GetVariantLink(image models.Image) (*string, error) {
-	req, _ := s.S3Svc.GetObjectRequest(&s3.GetObjectInput{
-		Bucket: aws.String(viper.GetString("AWS_BUCKET")),
-		Key:    aws.String(fmt.Sprintf("%s-%s-%s", image.Namespace, image.PrettyName, image.Hash)),
+	req, _ := s.s3Svc.GetObjectRequest(&s3.GetObjectInput{
+		Bucket:               aws.String(s.config.AwsBucket),
+		Key:                  aws.String(fmt.Sprintf("%s-%s-%s", image.Namespace, image.PrettyName, image.Hash)),
+		ResponseCacheControl: aws.String(fmt.Sprintf("max-age=%d", 24*time.Hour*7)),
 	})
-	urlStr, err := req.Presign(1 * time.Minute)
+	urlStr, err := req.Presign(20 * time.Minute)
 	if err != nil {
 		return nil, err
 	}
 	return &urlStr, nil
 }
 
-func (s *Service) BuildVariant(name string, namespace string, steps instructions.Instructions, hash string) (*models.Image, error) {
+func (s *Service) download(key string) ([]byte, error) {
 	buff := &aws.WriteAtBuffer{}
-	_, _ = s.Downloader.Download(buff, &s3.GetObjectInput{
-		Bucket: aws.String(viper.GetString("AWS_BUCKET")),
+	_, err := s.downloader.Download(buff, &s3.GetObjectInput{
+		Bucket: aws.String(s.config.AwsBucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return buff.Bytes(), nil
+
+}
+
+func (s *Service) DownloadVariant(image models.Image) ([]byte, error) {
+	return s.download(fmt.Sprintf("%s-%s-%s", image.Namespace, image.PrettyName, image.Hash))
+}
+
+func (s *Service) Download(image models.Image) ([]byte, error) {
+	return s.download(fmt.Sprintf("%s-%s", image.Namespace, image.PrettyName))
+}
+
+func (s *Service) BuildVariant(name string, namespace string, steps instructions.Instructions, hash string) (*models.Image, []byte, error) {
+	buff := &aws.WriteAtBuffer{}
+	_, _ = s.downloader.Download(buff, &s3.GetObjectInput{
+		Bucket: aws.String(s.config.AwsBucket),
 		Key:    aws.String(fmt.Sprintf("%s-%s", namespace, name)),
 	})
 
-	fmt.Println(len(buff.Bytes()))
-	//err := os.WriteFile("./testing", buff.Bytes(), 0644)
-	//fmt.Println(buff.Bytes())
-	//fmt.Println(http.DetectContentType(buff.Bytes()))
 	newVariant, err := s.applyTransform(buff.Bytes(), steps)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	r := bytes.NewReader(newVariant)
 	contentType := http.DetectContentType(newVariant)
 
-	up, err := s.Uploader.Upload(&s3manager.UploadInput{
-		Bucket:      aws.String(viper.GetString("AWS_BUCKET")),
+	up, err := s.uploader.Upload(&s3manager.UploadInput{
+		Bucket:      aws.String(s.config.AwsBucket),
 		Key:         aws.String(fmt.Sprintf("%s-%s-%s", namespace, name, hash)),
 		Body:        r,
 		ContentType: aws.String(contentType),
+		Metadata: map[string]*string{
+			"transform": aws.String(steps.String()),
+		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	image := &models.Image{
 		PrettyName: name,
@@ -164,26 +199,31 @@ func (s *Service) BuildVariant(name string, namespace string, steps instructions
 	}
 	err = s.Store(image)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return image, nil
+	return image, newVariant, nil
 }
 
 func (s *Service) applyTransform(image []byte, steps instructions.Instructions) ([]byte, error) {
+	var err error
+
 	buf := image
+	handlers := map[string]transforms.Transformation{}
+
 	for _, step := range steps {
-		fmt.Println(step)
 		for _, instruction := range step.Instructions {
-			fmt.Println(instruction)
-			handler, err := s.TransformManager.GetHandler(instruction)
+			handler, err := s.transformManager.GetHandler(instruction)
 			if err != nil {
 				return nil, err
 			}
-			buf, err = handler.Transform(buf, instruction)
-			if err != nil {
-				return nil, err
-			}
-			fmt.Println(handler)
+			handlers[instruction] = handler
+		}
+	}
+
+	for instruction, handler := range handlers {
+		buf, err = handler.Transform(buf, instruction)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return buf, nil

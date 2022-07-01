@@ -3,27 +3,21 @@ package transforms
 import (
 	"fmt"
 	"github.com/DAlperin/phosgraphe/internal/instructions"
-	"gopkg.in/gographics/imagick.v3/imagick"
+	"regexp"
 )
 
 type TransformManager struct {
-	Handlers    []Transformation
-	ImageMagick *imagick.MagickWand
+	Handlers []Transformation
 }
 
 func New() *TransformManager {
-	mw := imagick.NewMagickWand()
-
 	tm := TransformManager{
 		Handlers: []Transformation{
-			heightTransformation{
-				ImageMagick: mw,
-			},
-			widthTransformation{
-				ImageMagick: mw,
-			},
+			heightTransformation{},
+			widthTransformation{},
+			formatTransformation{},
+			rotateTransformation{},
 		},
-		ImageMagick: mw,
 	}
 
 	return &tm
@@ -45,4 +39,17 @@ func (tm *TransformManager) GetHandler(instruction string) (Transformation, erro
 type Transformation interface {
 	Transform(file []byte, instruction instructions.Instruction) ([]byte, error)
 	Handles(transform string) (bool, error)
+}
+
+func genericHandles(patterns []string, instruction instructions.Instruction) (bool, error) {
+	for _, s := range patterns {
+		match, err := regexp.MatchString(s, instruction)
+		if err != nil {
+			return false, err
+		}
+		if match {
+			return true, nil
+		}
+	}
+	return false, nil
 }
